@@ -289,6 +289,19 @@ func (h *Hub) BroadcastCommand(cmd Command, payload map[string]any) {
 	}
 }
 
+// BroadcastJSONToAgents sends the same JSON object to every connected agent (e.g. {"action": "update"}).
+func (h *Hub) BroadcastJSONToAgents(msg map[string]any) {
+	h.mu.RLock()
+	ids := make([]string, 0, len(h.agents))
+	for id := range h.agents {
+		ids = append(ids, id)
+	}
+	h.mu.RUnlock()
+	for _, id := range ids {
+		_ = h.SendJSONToAgent(id, msg)
+	}
+}
+
 func (h *Hub) HandleAgentMessage(agentID string, raw []byte) {
 	var msg map[string]any
 	if err := json.Unmarshal(raw, &msg); err != nil {

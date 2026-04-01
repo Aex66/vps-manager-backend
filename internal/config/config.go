@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -10,10 +11,18 @@ type Config struct {
 	JWTSecret      string
 	AgentSecret    string
 	SecretPepper   string // server-only; mixed into agent hardware fingerprint hash
-	AdminUser      string
-	AdminPass      string
-	ScreenshotHz   int
-	AutoRestartSec int
+	// Agent auto-update (optional): advertised latest build + signed-off zip URL + SHA-256.
+	AgentLatestVersion string
+	AgentUpdateZipURL  string
+	AgentUpdateSHA256  string
+	AdminUser          string
+	AdminPass          string
+	ScreenshotHz       int
+	AutoRestartSec     int
+	// Persistent dir for uploaded agent zip + manifest (e.g. Railway volume /data).
+	AgentUpdateDataDir string
+	// Public origin for building agent download URLs (e.g. https://yourapp.up.railway.app). Optional if X-Forwarded-* is correct.
+	PublicBaseURL string
 }
 
 func Load() Config {
@@ -33,15 +42,24 @@ func Load() Config {
 			ar = n
 		}
 	}
+	dataDir := strings.TrimSpace(os.Getenv("RAILWAY_VOLUME_MOUNT_PATH"))
+	if dataDir == "" {
+		dataDir = getenv("AGENT_UPDATE_DATA_DIR", "/data")
+	}
 	return Config{
-		Port:           port,
-		JWTSecret:      getenv("JWT_SECRET", "jwt-secret-1488"),
-		AgentSecret:    getenv("AGENT_SECRET", "agent-secret-1488"),
-		SecretPepper:   os.Getenv("SECRET_PEPPER"),
-		AdminUser:      getenv("ADMIN_USERNAME", "admin"),
-		AdminPass:      getenv("ADMIN_PASSWORD", "13579114"),
-		ScreenshotHz:   shz,
-		AutoRestartSec: ar,
+		Port:               port,
+		JWTSecret:          getenv("JWT_SECRET", "jwt-secret-1488"),
+		AgentSecret:        getenv("AGENT_SECRET", "agent-secret-1488"),
+		SecretPepper:       os.Getenv("SECRET_PEPPER"),
+		AgentLatestVersion: os.Getenv("AGENT_LATEST_VERSION"),
+		AgentUpdateZipURL:  os.Getenv("AGENT_UPDATE_ZIP_URL"),
+		AgentUpdateSHA256:  os.Getenv("AGENT_UPDATE_SHA256"),
+		AgentUpdateDataDir: dataDir,
+		PublicBaseURL:      strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")),
+		AdminUser:          getenv("ADMIN_USERNAME", "admin"),
+		AdminPass:          getenv("ADMIN_PASSWORD", "13579114"),
+		ScreenshotHz:       shz,
+		AutoRestartSec:     ar,
 	}
 }
 
