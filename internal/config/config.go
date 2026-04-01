@@ -9,6 +9,7 @@ type Config struct {
 	Port           string
 	JWTSecret      string
 	AgentSecret    string
+	SecretPepper   string // server-only; mixed into agent hardware fingerprint hash
 	AdminUser      string
 	AdminPass      string
 	ScreenshotHz   int
@@ -36,6 +37,7 @@ func Load() Config {
 		Port:           port,
 		JWTSecret:      getenv("JWT_SECRET", "jwt-secret-1488"),
 		AgentSecret:    getenv("AGENT_SECRET", "agent-secret-1488"),
+		SecretPepper:   os.Getenv("SECRET_PEPPER"),
 		AdminUser:      getenv("ADMIN_USERNAME", "admin"),
 		AdminPass:      getenv("ADMIN_PASSWORD", "13579114"),
 		ScreenshotHz:   shz,

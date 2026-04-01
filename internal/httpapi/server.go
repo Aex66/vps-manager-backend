@@ -13,6 +13,7 @@ import (
 
 	"github.com/vps-manager/back/internal/auth"
 	"github.com/vps-manager/back/internal/config"
+	"github.com/vps-manager/back/internal/hwfp"
 	"github.com/vps-manager/back/internal/hub"
 )
 
@@ -98,17 +99,29 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
 	host := r.URL.Query().Get("hostname")
 	if host == "" {
 		host = "unknown"
 	}
+	hwJSON := r.URL.Query().Get("hw")
+	legacyMID := r.URL.Query().Get("machine_id")
+	machineKey, err := resolveHardwareKey(s.cfg.SecretPepper, hwJSON, legacyMID)
+	if err != nil {
+		log.Printf("agent rejected invalid hw profile: %v", err)
+		http.Error(w, "bad hw profile", http.StatusBadRequest)
+		return
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
 	id := genAgentID()
-	s.hub.RegisterAgent(id, host, conn)
-	log.Printf("agent connected: %s (%s)", id, host)
+	s.hub.RegisterAgent(id, host, machineKey, conn)
+	if machineKey != "" {
+		log.Printf("agent connected: %s hostname=%s fp=%.12s…", id, host, machineKey)
+	} else {
+		log.Printf("agent connected: %s hostname=%s (no hardware profile; dedupe by hostname only)", id, host)
+	}
 
 	on, arSec := s.hub.AutoRestartState()
 	writeJSON(conn, map[string]any{
@@ -202,12 +215,48 @@ func (s *Server) handleUIMessage(raw []byte) {
 		secf, _ := m["interval_sec"].(float64)
 		sec := int(secf)
 		s.hub.UpdateScreenshotInterval(sec)
+	case "agent_rpc":
+		vpsID := wsString(m["vps_id"])
+		reqID := wsString(m["request_id"])
+		if vpsID == "" || reqID == "" {
+			log.Printf("ui agent_rpc ignored: missing vps_id or request_id")
+			return
+		}
+		out := make(map[string]any, len(m))
+		for k, v := range m {
+			if k == "vps_id" {
+				continue
+			}
+			out[k] = v
+		}
+		if !s.hub.SendJSONToAgent(vpsID, out) {
+			s.hub.BroadcastUI(map[string]any{
+				"type":       "agent_rpc_result",
+				"vps_id":     vpsID,
+				"request_id": reqID,
+				"ok":         false,
+				"error":      "agent offline or unknown id",
+			})
+		}
 	default:
 		log.Printf("ui msg: %s", t)
 	}
 }
 
 var agentCounter uint64
+
+// resolveHardwareKey prefers JSON `hw`; falls back to legacy `machine_id` (Windows MachineGuid only).
+func resolveHardwareKey(pepper, hwJSON, legacyMID string) (string, error) {
+	hwJSON = strings.TrimSpace(hwJSON)
+	legacyMID = strings.TrimSpace(legacyMID)
+	if hwJSON != "" {
+		return hwfp.FromJSON(pepper, hwJSON)
+	}
+	if legacyMID != "" {
+		return hwfp.FromLegacyMachineGUID(pepper, legacyMID), nil
+	}
+	return "", nil
+}
 
 func genAgentID() string {
 	return time.Now().UTC().Format("20060102150405") + "-" + itoa(atomic.AddUint64(&agentCounter, 1))

