@@ -43,9 +43,10 @@ type VPSInfo struct {
 	WebrbRunning   bool    `json:"webrb_running"`
 	UptimeSec      int64   `json:"uptime_sec,omitempty"`
 	NetSentMbps    float64 `json:"net_sent_mbps"`
-	NetRecvMbps    float64 `json:"net_recv_mbps"`
-	ScreenshotB64  string  `json:"screenshot_b64,omitempty"`
-	CookiesSnippet string  `json:"cookies_snippet,omitempty"`
+	NetRecvMbps     float64 `json:"net_recv_mbps"`
+	RobloxInstances int     `json:"roblox_instances"`
+	ScreenshotB64   string  `json:"screenshot_b64,omitempty"`
+	CookiesSnippet  string  `json:"cookies_snippet,omitempty"`
 }
 
 type AgentConn struct {
@@ -62,9 +63,10 @@ type AgentConn struct {
 	WebrbRunning bool
 	LocalIP      string
 	UptimeSec    int64
-	NetSentMbps  float64
-	NetRecvMbps  float64
-	MetricsTS    int64 // 0 = no sample yet
+	NetSentMbps     float64
+	NetRecvMbps     float64
+	RobloxInstances int
+	MetricsTS       int64 // 0 = no sample yet
 }
 
 type UIConn struct {
@@ -198,6 +200,7 @@ func (h *Hub) snapshotVPSListLocked() []VPSInfo {
 			vi.UptimeSec = a.UptimeSec
 			vi.NetSentMbps = a.NetSentMbps
 			vi.NetRecvMbps = a.NetRecvMbps
+			vi.RobloxInstances = a.RobloxInstances
 		} else {
 			vi.VoltRunning = true
 			vi.WebrbRunning = true
@@ -375,6 +378,7 @@ func (h *Hub) applyAgentMetrics(agentID string, msg map[string]any) {
 	a.UptimeSec = int64(numInt(msg["uptime_sec"]))
 	a.NetSentMbps = numFloat(msg["net_sent_mbps"])
 	a.NetRecvMbps = numFloat(msg["net_recv_mbps"])
+	a.RobloxInstances = numInt(msg["roblox_instances"])
 	a.MetricsTS = time.Now().Unix()
 	list := h.snapshotVPSListLocked()
 	h.mu.Unlock()
