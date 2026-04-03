@@ -84,22 +84,16 @@ type Hub struct {
 	autoRestartOn   bool
 	autoRestartSec  int
 	autoRestartStop chan struct{}
-
-	cfgScreenshotIntervalSec int
 }
 
-func NewHub(screenshotIntervalDefault int, autoRestartDefaultSec int) *Hub {
+func NewHub(autoRestartDefaultSec int) *Hub {
 	if autoRestartDefaultSec < 60 {
 		autoRestartDefaultSec = 3600
 	}
-	if screenshotIntervalDefault < 3 {
-		screenshotIntervalDefault = 5
-	}
 	return &Hub{
-		agents:                   make(map[string]*AgentConn),
-		ui:                       make(map[*UIConn]struct{}),
-		autoRestartSec:           autoRestartDefaultSec,
-		cfgScreenshotIntervalSec: screenshotIntervalDefault,
+		agents:         make(map[string]*AgentConn),
+		ui:             make(map[*UIConn]struct{}),
+		autoRestartSec: autoRestartDefaultSec,
 	}
 }
 
@@ -161,14 +155,12 @@ func (h *Hub) RegisterUI(uc *UIConn) {
 	list := h.snapshotVPSListLocked()
 	on := h.autoRestartOn
 	ar := h.autoRestartSec
-	si := h.cfgScreenshotIntervalSec
 	h.mu.Unlock()
 	h.sendToUI(uc, map[string]any{"type": "vps_list", "vps": list})
 	h.sendToUI(uc, map[string]any{
-		"type":                "auto_restart_state",
-		"enabled":             on,
-		"interval_sec":        ar,
-		"screenshot_interval": si,
+		"type":         "auto_restart_state",
+		"enabled":      on,
+		"interval_sec": ar,
 	})
 }
 
@@ -385,42 +377,6 @@ func (h *Hub) applyAgentMetrics(agentID string, msg map[string]any) {
 	h.BroadcastUI(map[string]any{"type": "vps_list", "vps": list})
 }
 
-func (h *Hub) UpdateScreenshotInterval(sec int) {
-	if sec < 3 {
-		sec = 3
-	}
-	h.mu.Lock()
-	h.cfgScreenshotIntervalSec = sec
-	agents := make([]*AgentConn, 0, len(h.agents))
-	for _, a := range h.agents {
-		agents = append(agents, a)
-	}
-	on := h.autoRestartOn
-	ar := h.autoRestartSec
-	h.mu.Unlock()
-	h.BroadcastUI(map[string]any{"type": "config_snapshot_interval", "seconds": sec})
-	b, err := json.Marshal(map[string]any{
-		"type":                    "config",
-		"screenshot_interval_sec": sec,
-		"auto_restart_enabled":    on,
-		"auto_restart_sec":        ar,
-	})
-	if err != nil {
-		return
-	}
-	for _, a := range agents {
-		a.mu.Lock()
-		_ = a.Conn.WriteMessage(websocket.TextMessage, b)
-		a.mu.Unlock()
-	}
-}
-
-func (h *Hub) ScreenshotInterval() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.cfgScreenshotIntervalSec
-}
-
 func (h *Hub) SetAutoRestart(enabled bool, intervalSec int) {
 	h.mu.Lock()
 	if intervalSec >= 60 {
@@ -437,7 +393,6 @@ func (h *Hub) SetAutoRestart(enabled bool, intervalSec int) {
 		d := h.autoRestartSec
 		go h.autoRestartLoop(stop, d)
 	}
-	si := h.cfgScreenshotIntervalSec
 	is := h.autoRestartSec
 	agents := make([]*AgentConn, 0, len(h.agents))
 	for _, a := range h.agents {
@@ -445,16 +400,14 @@ func (h *Hub) SetAutoRestart(enabled bool, intervalSec int) {
 	}
 	h.mu.Unlock()
 	h.BroadcastUI(map[string]any{
-		"type":                "auto_restart_state",
-		"enabled":             enabled,
-		"interval_sec":        is,
-		"screenshot_interval": si,
+		"type":         "auto_restart_state",
+		"enabled":      enabled,
+		"interval_sec": is,
 	})
 	b, err := json.Marshal(map[string]any{
-		"type":                    "config",
-		"screenshot_interval_sec": si,
-		"auto_restart_enabled":    enabled,
-		"auto_restart_sec":        is,
+		"type":                 "config",
+		"auto_restart_enabled": enabled,
+		"auto_restart_sec":     is,
 	})
 	if err == nil {
 		for _, a := range agents {

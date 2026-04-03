@@ -14,7 +14,7 @@ func main() {
 	// Optional: load ./.env into the process env (Go's os.Getenv does not read files).
 	_ = godotenv.Load()
 	cfg := config.Load()
-	h := hub.NewHub(cfg.ScreenshotHz, cfg.AutoRestartSec)
+	h := hub.NewHub(cfg.AutoRestartSec)
 	api := httpapi.New(&cfg, h)
 
 	addr := ":" + cfg.Port

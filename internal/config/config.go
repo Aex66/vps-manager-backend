@@ -17,7 +17,6 @@ type Config struct {
 	AgentUpdateSHA256  string
 	AdminUser          string
 	AdminPass          string
-	ScreenshotHz       int
 	AutoRestartSec     int
 	// Persistent dir for uploaded agent zip + manifest (e.g. Railway volume /data).
 	AgentUpdateDataDir string
@@ -29,12 +28,6 @@ func Load() Config {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
-	}
-	shz := 5
-	if v := os.Getenv("SCREENSHOT_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			shz = n
-		}
 	}
 	ar := 3600
 	if v := os.Getenv("AUTO_RESTART_DEFAULT_SEC"); v != "" {
@@ -58,7 +51,6 @@ func Load() Config {
 		PublicBaseURL:      strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")),
 		AdminUser:          getenv("ADMIN_USERNAME", "admin"),
 		AdminPass:          getenv("ADMIN_PASSWORD", "13579114"),
-		ScreenshotHz:       shz,
 		AutoRestartSec:     ar,
 	}
 }

@@ -287,10 +287,9 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 
 	on, arSec := s.hub.AutoRestartState()
 	writeJSON(conn, map[string]any{
-		"type":                    "config",
-		"screenshot_interval_sec": s.hub.ScreenshotInterval(),
-		"auto_restart_enabled":    on,
-		"auto_restart_sec":        arSec,
+		"type":                 "config",
+		"auto_restart_enabled": on,
+		"auto_restart_sec":     arSec,
 	})
 
 	go func() {
@@ -375,10 +374,6 @@ func (s *Server) handleUIMessage(raw []byte) {
 		secf, _ := m["interval_sec"].(float64)
 		sec := int(secf)
 		s.hub.SetAutoRestart(en, sec)
-	case "set_screenshot_interval":
-		secf, _ := m["interval_sec"].(float64)
-		sec := int(secf)
-		s.hub.UpdateScreenshotInterval(sec)
 	case "agent_rpc":
 		vpsID := wsString(m["vps_id"])
 		reqID := wsString(m["request_id"])
