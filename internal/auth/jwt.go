@@ -2,22 +2,58 @@ package auth
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
 type Claims struct {
-	Role string `json:"role"`
+	Role     string `json:"role"`
+	TenantID string `json:"tenant_id,omitempty"`
 	jwt.RegisteredClaims
 }
 
-func IssueToken(secret, subject string) (string, error) {
+// EffectiveTenantID returns tenant_id claim or "default" for dashboard (client) tokens.
+func (c *Claims) EffectiveTenantID() string {
+	t := strings.TrimSpace(c.TenantID)
+	if t == "" {
+		return "default"
+	}
+	return t
+}
+
+// IsPlatformOperator is true for the global operator: role admin and no tenant in the token.
+func IsPlatformOperator(c *Claims) bool {
+	if c == nil {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(c.Role)) == "admin" && strings.TrimSpace(c.TenantID) == ""
+}
+
+func IssueToken(secret, subject, tenantID, role string, ttl time.Duration) (string, error) {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	rl := strings.TrimSpace(strings.ToLower(role))
+	if rl == "" {
+		rl = "user"
+	}
+	var tid string
+	if rl == "admin" {
+		tid = ""
+	} else {
+		tid = strings.TrimSpace(tenantID)
+		if tid == "" {
+			tid = "default"
+		}
+	}
 	claims := Claims{
-		Role: "admin",
+		Role:     rl,
+		TenantID: tid,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   subject,
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}

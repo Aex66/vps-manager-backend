@@ -18,10 +18,15 @@ type Config struct {
 	AdminUser          string
 	AdminPass          string
 	AutoRestartSec     int
+	// JWT lifetime for UI sessions (hours). Default 720h (30d). Set JWT_EXPIRE_HOURS to override.
+	JWTExpireHours int
 	// Persistent dir for uploaded agent zip + manifest (e.g. Railway volume /data).
 	AgentUpdateDataDir string
 	// Public origin for building agent download URLs (e.g. https://yourapp.up.railway.app). Optional if X-Forwarded-* is correct.
 	PublicBaseURL string
+	// When set (e.g. postgres://user:pass@host:5432/dbname?sslmode=disable), UI login uses users table + bcrypt.
+	// If empty, login falls back to ADMIN_USERNAME / ADMIN_PASSWORD in env (legacy).
+	DatabaseURL string
 }
 
 func Load() Config {
@@ -35,12 +40,19 @@ func Load() Config {
 			ar = n
 		}
 	}
+	jwtH := 720
+	if v := os.Getenv("JWT_EXPIRE_HOURS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			jwtH = n
+		}
+	}
 	dataDir := strings.TrimSpace(os.Getenv("RAILWAY_VOLUME_MOUNT_PATH"))
 	if dataDir == "" {
 		dataDir = getenv("AGENT_UPDATE_DATA_DIR", "/data")
 	}
 	return Config{
 		Port:               port,
+		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		JWTSecret:          getenv("JWT_SECRET", "jwt-secret-1488"),
 		AgentSecret:        getenv("AGENT_SECRET", "agent-secret-1488"),
 		SecretPepper:       os.Getenv("SECRET_PEPPER"),
@@ -52,6 +64,7 @@ func Load() Config {
 		AdminUser:          getenv("ADMIN_USERNAME", "admin"),
 		AdminPass:          getenv("ADMIN_PASSWORD", "13579114"),
 		AutoRestartSec:     ar,
+		JWTExpireHours:     jwtH,
 	}
 }
 

@@ -1,0 +1,16 @@
+# Dev Postgres: docker compose -f docker-compose.postgres.yml up -d
+# Then set DATABASE_URL=postgres://vps:vps@localhost:5432/vpsmanager?sslmode=disable
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vps
+      POSTGRES_PASSWORD: vps
+      POSTGRES_DB: vpsmanager
+    ports:
+      - "5432:5432"
+    volumes:
+      - vpsmanager_pg:/var/lib/postgresql/data
+
+volumes:
+  vpsmanager_pg:
