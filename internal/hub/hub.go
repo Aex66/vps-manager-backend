@@ -43,7 +43,9 @@ type VPSInfo struct {
 	CpuPercent      float64 `json:"cpu_percent"`
 	Cores           int     `json:"cores"`
 	Threads         int     `json:"threads"`
+	Executor        string  `json:"executor,omitempty"`
 	VoltRunning     bool    `json:"volt_running"`
+	WaveRunning     bool    `json:"wave_running"`
 	WebrbRunning    bool    `json:"webrb_running"`
 	UptimeSec       int64   `json:"uptime_sec,omitempty"`
 	NetSentMbps     float64 `json:"net_sent_mbps"`
@@ -64,7 +66,9 @@ type AgentConn struct {
 	CpuPercent      float64
 	Cores           int
 	Threads         int
+	Executor        string
 	VoltRunning     bool
+	WaveRunning     bool
 	WebrbRunning    bool
 	LocalIP         string
 	UptimeSec       int64
@@ -118,7 +122,7 @@ func (h *Hub) tenantNorm(tid string) string {
 }
 
 // RegisterAgent registers an agent under a tenant; reconnect dedupe is per-tenant only.
-func (h *Hub) RegisterAgent(id, hostname, machineID, tenantID string, c *websocket.Conn) *AgentConn {
+func (h *Hub) RegisterAgent(id, hostname, machineID, tenantID, executor string, c *websocket.Conn) *AgentConn {
 	tenantID = h.tenantNorm(tenantID)
 	hostKey := strings.TrimSpace(hostname)
 	if hostKey == "" {
@@ -151,7 +155,11 @@ func (h *Hub) RegisterAgent(id, hostname, machineID, tenantID string, c *websock
 			stale = append(stale, a.Conn)
 		}
 	}
-	ac := &AgentConn{ID: id, Hostname: hostname, MachineID: mid, TenantID: tenantID, Conn: c}
+	ex := strings.TrimSpace(strings.ToLower(executor))
+	if ex != "wave" {
+		ex = "volt"
+	}
+	ac := &AgentConn{ID: id, Hostname: hostname, MachineID: mid, TenantID: tenantID, Executor: ex, Conn: c}
 	h.agents[id] = ac
 	list := h.snapshotVPSListLockedForTenant(tenantID)
 	h.mu.Unlock()
@@ -224,6 +232,10 @@ func (h *Hub) snapshotVPSListLockedForTenant(tenantID string) []VPSInfo {
 			LocalIP:   a.LocalIP,
 			Connected: true,
 			LastSeen:  time.Now().Unix(),
+			Executor:  a.Executor,
+		}
+		if vi.Executor == "" {
+			vi.Executor = "volt"
 		}
 		if a.MetricsTS > 0 {
 			vi.HasMetrics = true
@@ -231,13 +243,20 @@ func (h *Hub) snapshotVPSListLockedForTenant(tenantID string) []VPSInfo {
 			vi.Cores = a.Cores
 			vi.Threads = a.Threads
 			vi.VoltRunning = a.VoltRunning
+			vi.WaveRunning = a.WaveRunning
 			vi.WebrbRunning = a.WebrbRunning
 			vi.UptimeSec = a.UptimeSec
 			vi.NetSentMbps = a.NetSentMbps
 			vi.NetRecvMbps = a.NetRecvMbps
 			vi.RobloxInstances = a.RobloxInstances
 		} else {
-			vi.VoltRunning = true
+			if vi.Executor == "wave" {
+				vi.WaveRunning = true
+				vi.VoltRunning = false
+			} else {
+				vi.VoltRunning = true
+				vi.WaveRunning = false
+			}
 			vi.WebrbRunning = true
 		}
 		out = append(out, vi)
@@ -457,8 +476,17 @@ func (h *Hub) applyAgentMetrics(agentID string, msg map[string]any) {
 	a.CpuPercent = numFloat(msg["cpu_percent"])
 	a.Cores = numInt(msg["cores"])
 	a.Threads = numInt(msg["threads"])
+	if ex, ok := msg["executor"].(string); ok && strings.TrimSpace(ex) != "" {
+		e := strings.ToLower(strings.TrimSpace(ex))
+		if e == "wave" || e == "volt" {
+			a.Executor = e
+		}
+	}
 	if v, ok := msg["volt_running"].(bool); ok {
 		a.VoltRunning = v
+	}
+	if v, ok := msg["wave_running"].(bool); ok {
+		a.WaveRunning = v
 	}
 	if v, ok := msg["webrb_running"].(bool); ok {
 		a.WebrbRunning = v

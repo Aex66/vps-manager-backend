@@ -678,8 +678,16 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	executor := strings.TrimSpace(r.URL.Query().Get("executor"))
+	if executor == "" {
+		executor = "volt"
+	}
+	en := strings.ToLower(executor)
+	if en != "wave" {
+		en = "volt"
+	}
 	id := genAgentID()
-	s.hub.RegisterAgent(id, host, machineKey, tenantID, conn)
+	s.hub.RegisterAgent(id, host, machineKey, tenantID, en, conn)
 	if machineKey != "" {
 		log.Printf("agent connected: %s tenant=%s hostname=%s fp=%.12s…", id, tenantID, host, machineKey)
 	} else {
