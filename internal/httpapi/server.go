@@ -811,6 +811,22 @@ func (s *Server) handleUIMessage(uic *hub.UIConn, raw []byte) {
 		secf, _ := m["interval_sec"].(float64)
 		sec := int(secf)
 		s.hub.SetAutoRestart(tid, en, sec)
+	case "watch_screenshots":
+		vpsID := wsString(m["vps_id"])
+		en, _ := m["enabled"].(bool)
+		if !en {
+			s.hub.SetWatchScreenshot(uic, "")
+			break
+		}
+		if vpsID == "" {
+			break
+		}
+		atid, ok := s.hub.AgentTenant(vpsID)
+		if !ok || atid != tid {
+			log.Printf("ui watch_screenshots: vps_id=%q not in tenant %q", vpsID, tid)
+			break
+		}
+		s.hub.SetWatchScreenshot(uic, vpsID)
 	case "agent_rpc":
 		vpsID := wsString(m["vps_id"])
 		reqID := wsString(m["request_id"])

@@ -79,9 +79,19 @@ type AgentConn struct {
 }
 
 type UIConn struct {
-	Conn     *websocket.Conn
-	TenantID string
-	mu       sync.Mutex
+	Conn            *websocket.Conn
+	TenantID        string
+	mu              sync.Mutex
+	watchScreenshot string // agent VPS id for live preview stream; empty = none
+}
+
+// SetWatchScreenshot registers which agent's screenshots this UI session wants (live preview stream).
+// Pass empty agentID to disable. Only messages for that agent id are sent to this connection.
+func (h *Hub) SetWatchScreenshot(uc *UIConn, agentID string) {
+	agentID = strings.TrimSpace(agentID)
+	uc.mu.Lock()
+	uc.watchScreenshot = agentID
+	uc.mu.Unlock()
 }
 
 type tenantAutoRestart struct {
@@ -300,6 +310,34 @@ func (h *Hub) sendToUI(uc *UIConn, msg any) {
 	uc.mu.Unlock()
 }
 
+// SendScreenshotToWatchers delivers a screenshot only to UI sessions that subscribed to this agent.
+// If no session is watching, falls back to tenant-wide broadcast (e.g. context-menu capture).
+func (h *Hub) SendScreenshotToWatchers(tenantID, agentID, b64 string) {
+	tenantID = h.tenantNorm(tenantID)
+	payload := map[string]any{"type": "screenshot", "vps_id": agentID, "data": b64}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	h.mu.RLock()
+	sent := 0
+	for u := range h.ui {
+		if u.TenantID != tenantID {
+			continue
+		}
+		u.mu.Lock()
+		if u.watchScreenshot == agentID {
+			_ = u.Conn.WriteMessage(websocket.TextMessage, b)
+			sent++
+		}
+		u.mu.Unlock()
+	}
+	h.mu.RUnlock()
+	if sent == 0 {
+		h.BroadcastUITenant(tenantID, payload)
+	}
+}
+
 // AgentTenant returns (tenantID, true) if the agent is connected.
 func (h *Hub) AgentTenant(agentID string) (string, bool) {
 	h.mu.RLock()
@@ -412,7 +450,7 @@ func (h *Hub) HandleAgentMessage(agentID string, raw []byte) {
 	switch t {
 	case "screenshot":
 		b64, _ := msg["data"].(string)
-		h.BroadcastUITenant(tenantID, map[string]any{"type": "screenshot", "vps_id": agentID, "data": b64})
+		h.SendScreenshotToWatchers(tenantID, agentID, b64)
 	case "cookies":
 		txt, _ := msg["data"].(string)
 		h.BroadcastUITenant(tenantID, map[string]any{"type": "cookies", "vps_id": agentID, "data": txt})
