@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 
 	"github.com/vps-manager/back/internal/agentupdate"
@@ -67,6 +68,8 @@ func (s *Server) Routes() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/agent/version", s.handleAgentVersion)
+	mux.HandleFunc("/agent/commands/claim", s.handleCommandsClaim)
+	mux.HandleFunc("/agent/commands/ack", s.handleCommandsAck)
 	mux.HandleFunc("/agent/update/download", s.handleAgentUpdateDownload)
 	mux.HandleFunc("/api/admin/agent-bundle", s.handleAdminAgentBundle)
 	mux.HandleFunc("/api/admin/users", s.handleAdminUsersRoot)
@@ -659,11 +662,67 @@ func (s *Server) agentSecretAndTenantOK(r *http.Request, secret, tenantID string
 	return secret == s.cfg.AgentSecret
 }
 
-// validateConnectedAgent checks tenant secret and that the session is connected with matching queue key.
-func (s *Server) validateConnectedAgent(r *http.Request, secret, tenantID, vpsSessionID, queueKey string) bool {
+// agentClaimJWT is issued on WebSocket connect so /commands/claim can be validated on any replica
+// (in-memory hub is not shared across load-balanced processes).
+type agentClaimJWT struct {
+	VPS string `json:"vps"`
+	QK  string `json:"qk"`
+	TID string `json:"tid"`
+	jwt.RegisteredClaims
+}
+
+func (s *Server) issueAgentClaimToken(vpsID, queueKey, tenantID string) (string, error) {
+	sec := strings.TrimSpace(s.cfg.JWTSecret)
+	if sec == "" {
+		return "", fmt.Errorf("JWT_SECRET is empty")
+	}
+	now := time.Now()
+	claims := agentClaimJWT{
+		VPS: strings.TrimSpace(vpsID),
+		QK:  strings.TrimSpace(queueKey),
+		TID: normTenantID(tenantID),
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(now.Add(72 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(now),
+		},
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, &claims)
+	return tok.SignedString([]byte(sec))
+}
+
+func (s *Server) verifyAgentClaimToken(tokenStr, vpsID, queueKey, tenantID string) bool {
+	tokenStr = strings.TrimSpace(tokenStr)
+	if tokenStr == "" {
+		return false
+	}
+	sec := strings.TrimSpace(s.cfg.JWTSecret)
+	if sec == "" {
+		return false
+	}
+	var claims agentClaimJWT
+	_, err := jwt.ParseWithClaims(tokenStr, &claims, func(t *jwt.Token) (interface{}, error) {
+		if t.Method != jwt.SigningMethodHS256 {
+			return nil, fmt.Errorf("unexpected signing method")
+		}
+		return []byte(sec), nil
+	})
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(claims.VPS) == strings.TrimSpace(vpsID) &&
+		strings.TrimSpace(claims.QK) == strings.TrimSpace(queueKey) &&
+		normTenantID(claims.TID) == normTenantID(tenantID)
+}
+
+// validateCommandQueueClient checks agent secret, then either a signed claim_token (multi-replica)
+// or the in-memory hub session (single-process / legacy).
+func (s *Server) validateCommandQueueClient(r *http.Request, secret, tenantID, vpsSessionID, queueKey, claimToken string) bool {
 	tid := normTenantID(tenantID)
 	if !s.agentSecretAndTenantOK(r, secret, tid) {
 		return false
+	}
+	if strings.TrimSpace(claimToken) != "" && s.verifyAgentClaimToken(claimToken, vpsSessionID, queueKey, tid) {
+		return true
 	}
 	a, ok := s.hub.AgentSession(strings.TrimSpace(vpsSessionID))
 	if !ok {
@@ -701,12 +760,13 @@ func (s *Server) handleCommandsClaim(w http.ResponseWriter, r *http.Request) {
 		TenantID        string `json:"tenant_id"`
 		VpsID           string `json:"vps_id"`
 		CommandQueueKey string `json:"command_queue_key"`
+		ClaimToken      string `json:"claim_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	if !s.validateConnectedAgent(r, body.Secret, body.TenantID, body.VpsID, body.CommandQueueKey) {
+	if !s.validateCommandQueueClient(r, body.Secret, body.TenantID, body.VpsID, body.CommandQueueKey, body.ClaimToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -746,13 +806,14 @@ func (s *Server) handleCommandsAck(w http.ResponseWriter, r *http.Request) {
 		TenantID        string `json:"tenant_id"`
 		VpsID           string `json:"vps_id"`
 		CommandQueueKey string `json:"command_queue_key"`
+		ClaimToken      string `json:"claim_token"`
 		ID              string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	if !s.validateConnectedAgent(r, body.Secret, body.TenantID, body.VpsID, body.CommandQueueKey) {
+	if !s.validateCommandQueueClient(r, body.Secret, body.TenantID, body.VpsID, body.CommandQueueKey, body.ClaimToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -825,6 +886,13 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		"vps_id":               id,
 		"command_queue_key":    ac.CommandQueueKey(),
 		"reliable_commands":    s.cmdQ != nil,
+	}
+	if s.cmdQ != nil {
+		if ct, err := s.issueAgentClaimToken(id, ac.CommandQueueKey(), tenantID); err != nil {
+			log.Printf("agent claim token issue: %v", err)
+		} else if ct != "" {
+			cfgMsg["claim_token"] = ct
+		}
 	}
 	if err := ac.WriteTextJSON(cfgMsg); err != nil {
 		log.Printf("agent write config: %v", err)
