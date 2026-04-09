@@ -79,6 +79,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/ws/ui", s.handleUIWS)
 	mux.HandleFunc("/commands/claim", s.handleCommandsClaim)
 	mux.HandleFunc("/commands/ack", s.handleCommandsAck)
+	// Same handlers under /api — many reverse proxies forward /api/* and /ws/* but not bare /commands/*.
+	mux.HandleFunc("/api/commands/claim", s.handleCommandsClaim)
+	mux.HandleFunc("/api/commands/ack", s.handleCommandsAck)
 	return cors(logRequests(mux))
 }
 
