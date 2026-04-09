@@ -4,8 +4,11 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
+	"github.com/vps-manager/back/internal/cmdqueue"
 	"github.com/vps-manager/back/internal/config"
 	"github.com/vps-manager/back/internal/hub"
 	"github.com/vps-manager/back/internal/httpapi"
@@ -38,7 +41,19 @@ func main() {
 		log.Printf("postgres: DATABASE_URL empty; UI login uses ADMIN_USERNAME / ADMIN_PASSWORD from env (legacy)")
 	}
 
-	api := httpapi.New(&cfg, h, userDB)
+	var cmdStore *cmdqueue.Store
+	if ru := strings.TrimSpace(cfg.RedisURL); ru != "" {
+		st, err := cmdqueue.New(ru)
+		if err != nil {
+			log.Fatalf("redis command queue: %v", err)
+		}
+		st.ApplyStale(cmdqueue.ParseStaleSec(os.Getenv))
+		cmdStore = st
+		defer func() { _ = cmdStore.Close() }()
+		log.Printf("redis: reliable command queue enabled (stale recovery after %s)", st.StaleDuration())
+	}
+
+	api := httpapi.New(&cfg, h, userDB, cmdStore)
 
 	addr := ":" + cfg.Port
 	log.Printf("listening on %s", addr)

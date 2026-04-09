@@ -3,7 +3,9 @@ package hub
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -78,6 +80,31 @@ type AgentConn struct {
 	MetricsTS       int64
 }
 
+// CommandQueueKey is the Redis list suffix for this agent: hardware fingerprint when set, else transient session id.
+func (a *AgentConn) CommandQueueKey() string {
+	if a == nil {
+		return ""
+	}
+	if m := strings.TrimSpace(a.MachineID); m != "" {
+		return m
+	}
+	return a.ID
+}
+
+// WriteTextJSON sends one JSON text frame. Must use this (under mu) for all agent writes so frames are not interleaved.
+func (a *AgentConn) WriteTextJSON(v any) error {
+	if a == nil || a.Conn == nil {
+		return errors.New("agent: no connection")
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Conn.WriteMessage(websocket.TextMessage, b)
+}
+
 type UIConn struct {
 	Conn            *websocket.Conn
 	TenantID        string
@@ -103,12 +130,14 @@ type tenantAutoRestart struct {
 type Hub struct {
 	mu sync.RWMutex
 
-	agents              map[string]*AgentConn
-	ui                  map[*UIConn]struct{}
+	agents                map[string]*AgentConn
+	ui                    map[*UIConn]struct{}
 	defaultAutoRestartSec int
 
 	autoMu       sync.Mutex
 	autoByTenant map[string]*tenantAutoRestart
+
+	webrtc *webRTCSignal // WebRTC signaling (UI↔agent only)
 }
 
 func NewHub(autoRestartDefaultSec int) *Hub {
@@ -120,6 +149,7 @@ func NewHub(autoRestartDefaultSec int) *Hub {
 		ui:                    make(map[*UIConn]struct{}),
 		defaultAutoRestartSec: autoRestartDefaultSec,
 		autoByTenant:          make(map[string]*tenantAutoRestart),
+		webrtc:                &webRTCSignal{sessions: make(map[string]*webrtcSessionEntry)},
 	}
 }
 
@@ -182,6 +212,7 @@ func (h *Hub) RegisterAgent(id, hostname, machineID, tenantID, executor string, 
 }
 
 func (h *Hub) UnregisterAgent(id string) {
+	h.removeWebRTCSessionsForAgent(id)
 	h.mu.Lock()
 	a, ok := h.agents[id]
 	if !ok {
@@ -224,6 +255,7 @@ func (h *Hub) RegisterUI(uc *UIConn) {
 }
 
 func (h *Hub) UnregisterUI(uc *UIConn) {
+	h.removeWebRTCSessionsForUI(uc)
 	h.mu.Lock()
 	delete(h.ui, uc)
 	h.mu.Unlock()
@@ -271,6 +303,25 @@ func (h *Hub) snapshotVPSListLockedForTenant(tenantID string) []VPSInfo {
 		}
 		out = append(out, vi)
 	}
+	// Map iteration order is random; stable sort so the dashboard grid/list does not reshuffle every push.
+	sort.Slice(out, func(i, j int) bool {
+		hi := strings.ToLower(strings.TrimSpace(out[i].Hostname))
+		hj := strings.ToLower(strings.TrimSpace(out[j].Hostname))
+		if hi != hj {
+			return hi < hj
+		}
+		mi := strings.ToLower(strings.TrimSpace(out[i].MachineID))
+		mj := strings.ToLower(strings.TrimSpace(out[j].MachineID))
+		if mi != mj {
+			return mi < mj
+		}
+		li := strings.ToLower(strings.TrimSpace(out[i].LocalIP))
+		lj := strings.ToLower(strings.TrimSpace(out[j].LocalIP))
+		if li != lj {
+			return li < lj
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 
@@ -305,8 +356,21 @@ func (h *Hub) sendToUI(uc *UIConn, msg any) {
 	if err != nil {
 		return
 	}
+	h.sendRawToUI(uc, b)
+}
+
+// SendToUI delivers one JSON message to a single dashboard session (e.g. command duplicate notice).
+func (h *Hub) SendToUI(uc *UIConn, msg any) {
+	h.sendToUI(uc, msg)
+}
+
+// sendRawToUI writes one JSON text frame (e.g. opaque WebRTC signaling from agent).
+func (h *Hub) sendRawToUI(uc *UIConn, raw []byte) {
+	if uc == nil || uc.Conn == nil {
+		return
+	}
 	uc.mu.Lock()
-	_ = uc.Conn.WriteMessage(websocket.TextMessage, b)
+	_ = uc.Conn.WriteMessage(websocket.TextMessage, raw)
 	uc.mu.Unlock()
 }
 
@@ -349,6 +413,31 @@ func (h *Hub) AgentTenant(agentID string) (string, bool) {
 	return a.TenantID, true
 }
 
+// NotifyNewCommand tells a connected agent to pull work from the command queue (HTTP claim).
+func (h *Hub) NotifyNewCommand(agentID string) {
+	h.mu.RLock()
+	a, ok := h.agents[agentID]
+	h.mu.RUnlock()
+	if !ok {
+		return
+	}
+	b, err := json.Marshal(map[string]any{"type": "new_command"})
+	if err != nil {
+		return
+	}
+	a.mu.Lock()
+	_ = a.Conn.WriteMessage(websocket.TextMessage, b)
+	a.mu.Unlock()
+}
+
+// AgentSession returns the agent for a session id if connected.
+func (h *Hub) AgentSession(agentID string) (*AgentConn, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	a, ok := h.agents[agentID]
+	return a, ok
+}
+
 func (h *Hub) SendToAgent(agentID string, cmd Command, payload map[string]any) bool {
 	h.mu.RLock()
 	a, ok := h.agents[agentID]
@@ -385,6 +474,21 @@ func (h *Hub) SendJSONToAgent(agentID string, msg map[string]any) bool {
 	err = a.Conn.WriteMessage(websocket.TextMessage, b)
 	a.mu.Unlock()
 	return err == nil
+}
+
+// EachAgentInTenant calls fn for every connected agent in the tenant; fn returns false to stop iteration.
+func (h *Hub) EachAgentInTenant(tenantID string, fn func(agentID string, a *AgentConn) bool) {
+	tenantID = h.tenantNorm(tenantID)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for id, a := range h.agents {
+		if a.TenantID != tenantID {
+			continue
+		}
+		if !fn(id, a) {
+			return
+		}
+	}
 }
 
 func (h *Hub) BroadcastCommandTenant(tenantID string, cmd Command, payload map[string]any) {
@@ -471,6 +575,20 @@ func (h *Hub) HandleAgentMessage(agentID string, raw []byte) {
 			"cmd":    cmd,
 			"reason": reason,
 		})
+	case "webrtc_answer", "webrtc_ice_candidate":
+		sid, _ := msg["webrtc_session_id"].(string)
+		sid = strings.TrimSpace(sid)
+		if sid == "" {
+			break
+		}
+		msg["vps_id"] = agentID
+		b, err := json.Marshal(msg)
+		if err != nil {
+			break
+		}
+		if !h.ForwardWebRTCSignalToUI(sid, b) {
+			log.Printf("webrtc %s: unknown session %q (agent %s)", t, sid, agentID)
+		}
 	case "pong", "ack":
 	default:
 		log.Printf("agent msg: %s", t)

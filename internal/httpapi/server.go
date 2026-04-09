@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/vps-manager/back/internal/agentupdate"
 	"github.com/vps-manager/back/internal/auth"
+	"github.com/vps-manager/back/internal/cmdqueue"
 	"github.com/vps-manager/back/internal/config"
 	"github.com/vps-manager/back/internal/hub"
 	"github.com/vps-manager/back/internal/hwfp"
@@ -42,14 +44,15 @@ type Server struct {
 	hub     *hub.Hub
 	bundles *agentupdate.Store
 	users   *userstore.Store
+	cmdQ    *cmdqueue.Store
 }
 
-func New(c *config.Config, h *hub.Hub, users *userstore.Store) *Server {
+func New(c *config.Config, h *hub.Hub, users *userstore.Store, cmdQ *cmdqueue.Store) *Server {
 	dir := strings.TrimSpace(c.AgentUpdateDataDir)
 	if dir == "" {
 		dir = "/data"
 	}
-	return &Server{cfg: c, hub: h, bundles: agentupdate.NewStore(dir), users: users}
+	return &Server{cfg: c, hub: h, bundles: agentupdate.NewStore(dir), users: users, cmdQ: cmdQ}
 }
 
 type loginBody struct {
@@ -74,6 +77,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/ws/agent", s.handleAgentWS)
 	mux.HandleFunc("/ws/ui", s.handleUIWS)
+	mux.HandleFunc("/commands/claim", s.handleCommandsClaim)
+	mux.HandleFunc("/commands/ack", s.handleCommandsAck)
 	return cors(logRequests(mux))
 }
 
@@ -651,6 +656,121 @@ func (s *Server) agentSecretAndTenantOK(r *http.Request, secret, tenantID string
 	return secret == s.cfg.AgentSecret
 }
 
+// validateConnectedAgent checks tenant secret and that the session is connected with matching queue key.
+func (s *Server) validateConnectedAgent(r *http.Request, secret, tenantID, vpsSessionID, queueKey string) bool {
+	tid := normTenantID(tenantID)
+	if !s.agentSecretAndTenantOK(r, secret, tid) {
+		return false
+	}
+	a, ok := s.hub.AgentSession(strings.TrimSpace(vpsSessionID))
+	if !ok {
+		return false
+	}
+	if hubTenantNorm(a.TenantID) != tid {
+		return false
+	}
+	qk := strings.TrimSpace(queueKey)
+	if qk == "" || qk != a.CommandQueueKey() {
+		return false
+	}
+	return true
+}
+
+func hubTenantNorm(t string) string {
+	t = strings.TrimSpace(t)
+	if t == "" {
+		return "default"
+	}
+	return t
+}
+
+func (s *Server) handleCommandsClaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cmdQ == nil {
+		http.Error(w, "command queue not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		Secret          string `json:"secret"`
+		TenantID        string `json:"tenant_id"`
+		VpsID           string `json:"vps_id"`
+		CommandQueueKey string `json:"command_queue_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if !s.validateConnectedAgent(r, body.Secret, body.TenantID, body.VpsID, body.CommandQueueKey) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	res, err := s.cmdQ.Claim(r.Context(), strings.TrimSpace(body.CommandQueueKey))
+	if err != nil {
+		log.Printf("commands claim: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if res == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	out := map[string]any{
+		"id":       res.ID,
+		"cmd":      res.Cmd,
+		"attempts": res.Attempts,
+	}
+	for k, v := range res.Extras {
+		out[k] = v
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (s *Server) handleCommandsAck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cmdQ == nil {
+		http.Error(w, "command queue not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		Secret          string `json:"secret"`
+		TenantID        string `json:"tenant_id"`
+		VpsID           string `json:"vps_id"`
+		CommandQueueKey string `json:"command_queue_key"`
+		ID              string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if !s.validateConnectedAgent(r, body.Secret, body.TenantID, body.VpsID, body.CommandQueueKey) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	cid := strings.TrimSpace(body.ID)
+	if cid == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	err := s.cmdQ.Ack(r.Context(), strings.TrimSpace(body.CommandQueueKey), cid)
+	if err != nil {
+		if errors.Is(err, cmdqueue.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("commands ack: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	secret := r.URL.Query().Get("secret")
 	tenantID := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
@@ -687,7 +807,7 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		en = "volt"
 	}
 	id := genAgentID()
-	s.hub.RegisterAgent(id, host, machineKey, tenantID, en, conn)
+	ac := s.hub.RegisterAgent(id, host, machineKey, tenantID, en, conn)
 	if machineKey != "" {
 		log.Printf("agent connected: %s tenant=%s hostname=%s fp=%.12s…", id, tenantID, host, machineKey)
 	} else {
@@ -695,11 +815,17 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	on, arSec := s.hub.AutoRestartStateForTenant(tenantID)
-	writeJSON(conn, map[string]any{
+	cfgMsg := map[string]any{
 		"type":                 "config",
 		"auto_restart_enabled": on,
 		"auto_restart_sec":     arSec,
-	})
+		"vps_id":               id,
+		"command_queue_key":    ac.CommandQueueKey(),
+		"reliable_commands":    s.cmdQ != nil,
+	}
+	if err := ac.WriteTextJSON(cfgMsg); err != nil {
+		log.Printf("agent write config: %v", err)
+	}
 
 	go func() {
 		defer func() {
@@ -791,8 +917,38 @@ func (s *Server) handleUIMessage(uic *hub.UIConn, raw []byte) {
 		if v, ok := m["cmd_secret"]; ok {
 			payload["cmd_secret"] = wsString(v)
 		}
-		if !s.hub.SendToAgent(vpsID, hub.Command(cmd), payload) {
-			log.Printf("ui run_command: no agent id=%q (disconnected or unknown)", vpsID)
+		if s.cmdQ != nil {
+			a, ok := s.hub.AgentSession(vpsID)
+			if !ok {
+				log.Printf("ui run_command: session lost id=%q", vpsID)
+				return
+			}
+			qk := a.CommandQueueKey()
+			ctx := context.Background()
+			dup, err := s.cmdQ.HasQueuedOrProcessingOfCmd(ctx, qk, cmd)
+			if err != nil {
+				log.Printf("ui run_command duplicate check: %v", err)
+				return
+			}
+			if dup {
+				s.hub.SendToUI(uic, map[string]any{
+					"type":    "command_rejected",
+					"vps_id":  vpsID,
+					"cmd":     cmd,
+					"reason":  "already_queued",
+					"message": "The same command is already pending or processing for this VPS.",
+				})
+				return
+			}
+			if _, err := s.cmdQ.Enqueue(ctx, qk, cmd, payload); err != nil {
+				log.Printf("ui run_command enqueue: %v", err)
+				return
+			}
+			s.hub.NotifyNewCommand(vpsID)
+		} else {
+			if !s.hub.SendToAgent(vpsID, hub.Command(cmd), payload) {
+				log.Printf("ui run_command: no agent id=%q (disconnected or unknown)", vpsID)
+			}
 		}
 	case "broadcast_command":
 		cmd := wsString(m["cmd"])
@@ -803,7 +959,41 @@ func (s *Server) handleUIMessage(uic *hub.UIConn, raw []byte) {
 		if v, ok := m["cmd_secret"]; ok {
 			payload["cmd_secret"] = wsString(v)
 		}
-		s.hub.BroadcastCommandTenant(tid, hub.Command(cmd), payload)
+		if s.cmdQ != nil {
+			ctx := context.Background()
+			enqueued := 0
+			skippedDup := 0
+			s.hub.EachAgentInTenant(tid, func(agentID string, a *hub.AgentConn) bool {
+				qk := a.CommandQueueKey()
+				dup, err := s.cmdQ.HasQueuedOrProcessingOfCmd(ctx, qk, cmd)
+				if err != nil {
+					log.Printf("broadcast_command duplicate check %s: %v", agentID, err)
+					return true
+				}
+				if dup {
+					skippedDup++
+					return true
+				}
+				if _, err := s.cmdQ.Enqueue(ctx, qk, cmd, payload); err != nil {
+					log.Printf("broadcast_command enqueue %s: %v", agentID, err)
+					return true
+				}
+				enqueued++
+				s.hub.NotifyNewCommand(agentID)
+				return true
+			})
+			if enqueued == 0 && skippedDup > 0 {
+				s.hub.SendToUI(uic, map[string]any{
+					"type":    "command_rejected",
+					"vps_id":  "",
+					"cmd":     cmd,
+					"reason":  "already_queued_fleet",
+					"message": "Every connected agent already has this command queued or in progress.",
+				})
+			}
+		} else {
+			s.hub.BroadcastCommandTenant(tid, hub.Command(cmd), payload)
+		}
 	case "broadcast_agent_update":
 		s.hub.BroadcastJSONToAgentsTenant(tid, map[string]any{"action": "update"})
 	case "set_auto_restart":
@@ -827,6 +1017,52 @@ func (s *Server) handleUIMessage(uic *hub.UIConn, raw []byte) {
 			break
 		}
 		s.hub.SetWatchScreenshot(uic, vpsID)
+	case "webrtc_offer":
+		vpsID := wsString(m["vps_id"])
+		sid := wsString(m["webrtc_session_id"])
+		if vpsID == "" || sid == "" {
+			return
+		}
+		atid, ok := s.hub.AgentTenant(vpsID)
+		if !ok || atid != tid {
+			log.Printf("ui webrtc_offer: vps_id=%q not in tenant %q", vpsID, tid)
+			return
+		}
+		s.hub.RegisterWebRTCSession(sid, uic, vpsID, tid)
+		if !s.hub.SendJSONToAgent(vpsID, m) {
+			s.hub.UnregisterWebRTCSession(sid)
+			log.Printf("ui webrtc_offer: agent offline id=%q", vpsID)
+		}
+	case "webrtc_ice_candidate":
+		vpsID := wsString(m["vps_id"])
+		sid := wsString(m["webrtc_session_id"])
+		if vpsID == "" || sid == "" {
+			return
+		}
+		if !s.hub.WebRTCIceFromUIAllowed(sid, uic, vpsID, tid) {
+			return
+		}
+		atid, ok := s.hub.AgentTenant(vpsID)
+		if !ok || atid != tid {
+			return
+		}
+		if !s.hub.SendJSONToAgent(vpsID, m) {
+			log.Printf("ui webrtc_ice_candidate: send failed id=%q", vpsID)
+		}
+	case "webrtc_hangup":
+		sid := wsString(m["webrtc_session_id"])
+		vpsID := wsString(m["vps_id"])
+		if sid != "" {
+			s.hub.UnregisterWebRTCSession(sid)
+		}
+		if vpsID == "" {
+			break
+		}
+		atid, ok := s.hub.AgentTenant(vpsID)
+		if !ok || atid != tid {
+			break
+		}
+		_ = s.hub.SendJSONToAgent(vpsID, m)
 	case "agent_rpc":
 		vpsID := wsString(m["vps_id"])
 		reqID := wsString(m["request_id"])

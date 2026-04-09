@@ -27,6 +27,9 @@ type Config struct {
 	// When set (e.g. postgres://user:pass@host:5432/dbname?sslmode=disable), UI login uses users table + bcrypt.
 	// If empty, login falls back to ADMIN_USERNAME / ADMIN_PASSWORD in env (legacy).
 	DatabaseURL string
+	// Redis URL for reliable command delivery, e.g. redis://localhost:6379/0 or redis://user:pass@host:6379
+	// If empty, dashboard commands are sent directly over WebSocket (legacy).
+	RedisURL string
 }
 
 func Load() Config {
@@ -53,6 +56,7 @@ func Load() Config {
 	return Config{
 		Port:               port,
 		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		RedisURL:           strings.TrimSpace(os.Getenv("REDIS_URL")),
 		JWTSecret:          getenv("JWT_SECRET", "jwt-secret-1488"),
 		AgentSecret:        getenv("AGENT_SECRET", "agent-secret-1488"),
 		SecretPepper:       os.Getenv("SECRET_PEPPER"),
