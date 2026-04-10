@@ -34,6 +34,17 @@ const (
 	CmdPing            Command = "ping"
 )
 
+// NormalizeAgentExecutor returns volt, wave, or custom for agent query params and metrics.
+func NormalizeAgentExecutor(ex string) string {
+	e := strings.ToLower(strings.TrimSpace(ex))
+	switch e {
+	case "wave", "custom":
+		return e
+	default:
+		return "volt"
+	}
+}
+
 type VPSInfo struct {
 	ID              string  `json:"id"`
 	Hostname        string  `json:"hostname"`
@@ -48,6 +59,7 @@ type VPSInfo struct {
 	Executor        string  `json:"executor,omitempty"`
 	VoltRunning     bool    `json:"volt_running"`
 	WaveRunning     bool    `json:"wave_running"`
+	CustomRunning   bool    `json:"custom_running"`
 	WebrbRunning    bool    `json:"webrb_running"`
 	UptimeSec       int64   `json:"uptime_sec,omitempty"`
 	NetSentMbps     float64 `json:"net_sent_mbps"`
@@ -71,6 +83,7 @@ type AgentConn struct {
 	Executor        string
 	VoltRunning     bool
 	WaveRunning     bool
+	CustomRunning   bool
 	WebrbRunning    bool
 	LocalIP         string
 	UptimeSec       int64
@@ -195,10 +208,7 @@ func (h *Hub) RegisterAgent(id, hostname, machineID, tenantID, executor string, 
 			stale = append(stale, a.Conn)
 		}
 	}
-	ex := strings.TrimSpace(strings.ToLower(executor))
-	if ex != "wave" {
-		ex = "volt"
-	}
+	ex := NormalizeAgentExecutor(executor)
 	ac := &AgentConn{ID: id, Hostname: hostname, MachineID: mid, TenantID: tenantID, Executor: ex, Conn: c}
 	h.agents[id] = ac
 	list := h.snapshotVPSListLockedForTenant(tenantID)
@@ -286,6 +296,7 @@ func (h *Hub) snapshotVPSListLockedForTenant(tenantID string) []VPSInfo {
 			vi.Threads = a.Threads
 			vi.VoltRunning = a.VoltRunning
 			vi.WaveRunning = a.WaveRunning
+			vi.CustomRunning = a.CustomRunning
 			vi.WebrbRunning = a.WebrbRunning
 			vi.UptimeSec = a.UptimeSec
 			vi.NetSentMbps = a.NetSentMbps
@@ -295,9 +306,15 @@ func (h *Hub) snapshotVPSListLockedForTenant(tenantID string) []VPSInfo {
 			if vi.Executor == "wave" {
 				vi.WaveRunning = true
 				vi.VoltRunning = false
+				vi.CustomRunning = false
+			} else if vi.Executor == "custom" {
+				vi.CustomRunning = true
+				vi.VoltRunning = false
+				vi.WaveRunning = false
 			} else {
 				vi.VoltRunning = true
 				vi.WaveRunning = false
+				vi.CustomRunning = false
 			}
 			vi.WebrbRunning = true
 		}
@@ -633,16 +650,16 @@ func (h *Hub) applyAgentMetrics(agentID string, msg map[string]any) {
 	a.Cores = numInt(msg["cores"])
 	a.Threads = numInt(msg["threads"])
 	if ex, ok := msg["executor"].(string); ok && strings.TrimSpace(ex) != "" {
-		e := strings.ToLower(strings.TrimSpace(ex))
-		if e == "wave" || e == "volt" {
-			a.Executor = e
-		}
+		a.Executor = NormalizeAgentExecutor(ex)
 	}
 	if v, ok := msg["volt_running"].(bool); ok {
 		a.VoltRunning = v
 	}
 	if v, ok := msg["wave_running"].(bool); ok {
 		a.WaveRunning = v
+	}
+	if v, ok := msg["custom_running"].(bool); ok {
+		a.CustomRunning = v
 	}
 	if v, ok := msg["webrb_running"].(bool); ok {
 		a.WebrbRunning = v

@@ -866,10 +866,7 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	if executor == "" {
 		executor = "volt"
 	}
-	en := strings.ToLower(executor)
-	if en != "wave" {
-		en = "volt"
-	}
+	en := hub.NormalizeAgentExecutor(executor)
 	id := genAgentID()
 	ac := s.hub.RegisterAgent(id, host, machineKey, tenantID, en, conn)
 	if machineKey != "" {
